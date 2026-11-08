@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
 import android.view.WindowManager
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
@@ -124,6 +125,17 @@ internal fun SettingsSheet(
     var busy by remember { mutableStateOf(false) }
     var visibleToken by remember { mutableStateOf(false) }
     var confirmingRemoval by remember { mutableStateOf(false) }
+    var visible by remember { mutableStateOf(true) }
+    var afterDismiss by remember { mutableStateOf<(() -> Unit)?>(null) }
+    val dismiss: (() -> Unit) -> Unit = { action ->
+        if (visible) {
+            keyboard?.hide()
+            afterDismiss = action
+            visible = false
+        }
+    }
+    val close: () -> Unit = { dismiss(onClose) }
+    BackHandler(enabled = !visible) {}
 
     if (editor == Editor.Token) {
         DisposableEffect(context) {
@@ -136,7 +148,7 @@ internal fun SettingsSheet(
     }
 
     val submit: () -> Unit = {
-        if (!busy) {
+        if (!busy && visible) {
             keyboard?.hide()
             scope.launch {
                 busy = true
@@ -148,7 +160,7 @@ internal fun SettingsSheet(
                         else -> null
                     }
                     if (result != null) error = result
-                    else if (editor == Editor.Add) onAdded() else onClose()
+                    else if (editor == Editor.Add) dismiss(onAdded) else close()
                 } finally {
                     busy = false
                 }
@@ -157,11 +169,12 @@ internal fun SettingsSheet(
     }
 
     SuperBottomSheet(
-        show = true, onDismissRequest = { if (!busy) onClose() }, allowDismiss = !busy,
+        show = visible, onDismissRequest = { if (!busy) close() }, allowDismiss = !busy,
+        onDismissFinished = { afterDismiss?.invoke() },
         backgroundColor = MiuixTheme.colorScheme.surfaceContainer, cornerRadius = 22.dp,
     ) {
         Column(
-            Modifier.fillMaxWidth().navigationBarsPadding().imePadding()
+            Modifier.fillMaxWidth().blockInactiveInput(visible).navigationBarsPadding().imePadding()
                 .verticalScroll(rememberScrollState()).padding(bottom = 5.dp),
             verticalArrangement = Arrangement.spacedBy(11.dp),
         ) {
@@ -222,7 +235,7 @@ internal fun SettingsSheet(
                             modifier = Modifier.fillMaxWidth(), enabled = value.isNotBlank() && !busy,
                             minHeight = 48.dp, colors = ButtonDefaults.textButtonColorsPrimary())
                     } else {
-                        SheetActions("保存", !busy, onClose, submit)
+                        SheetActions("保存", !busy && visible, close, submit)
                         if (isToken && config.hasToken) {
                             TextButton(
                                 "清除 Token", onClick = {
@@ -230,7 +243,7 @@ internal fun SettingsSheet(
                                         busy = true
                                         try {
                                             val result = tracker.setToken("")
-                                            if (result == null) onClose() else error = result
+                                            if (result == null) close() else error = result
                                         } finally {
                                             busy = false
                                         }
@@ -244,7 +257,7 @@ internal fun SettingsSheet(
                 Editor.Interval -> Column(Modifier.selectableGroup()) {
                     intervals.forEach { hours ->
                         ChoiceRow("$hours 小时", hours == config.intervalHours) {
-                            scope.launch { tracker.setInterval(hours); onClose() }
+                            scope.launch { tracker.setInterval(hours); close() }
                         }
                     }
                     Spacer(Modifier.height(9.dp))
@@ -253,7 +266,7 @@ internal fun SettingsSheet(
                 Editor.Appearance -> Column(Modifier.selectableGroup()) {
                     appearanceNames.forEach { (key, name) ->
                         ChoiceRow(name, key == config.appearance) {
-                            scope.launch { tracker.setAppearance(key); onClose() }
+                            scope.launch { tracker.setAppearance(key); close() }
                         }
                     }
                 }
@@ -266,7 +279,7 @@ internal fun SettingsSheet(
                                 busy = true
                                 try {
                                     tracker.remove(subscription.id)
-                                    onClose()
+                                    close()
                                 } finally {
                                     busy = false
                                 }
@@ -274,7 +287,7 @@ internal fun SettingsSheet(
                         }
                     } else {
                         val latest = state.feed.filter { it.repo.key == subscription.repo.key }.maxByOrNull { it.publishedAt }
-                        PreferenceArrow("历史版本", latest?.tag ?: "暂无版本") { onHistory(subscription.id) }
+                        PreferenceArrow("历史版本", latest?.tag ?: "暂无版本") { dismiss { onHistory(subscription.id) } }
                         TextButton("在 GitHub 查看", { openWeb(context, Uri.parse(subscription.repo.webUrl)) },
                             modifier = Modifier.fillMaxWidth(), minHeight = 48.dp)
                         TextButton("取消订阅", { confirmingRemoval = true }, modifier = Modifier.fillMaxWidth(),

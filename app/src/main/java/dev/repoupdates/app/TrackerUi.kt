@@ -7,6 +7,13 @@ import android.widget.TextView
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.ContentTransform
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -25,12 +32,17 @@ import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -46,6 +58,7 @@ import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.*
+import top.yukonga.miuix.kmp.anim.folmeSpring
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.*
 import top.yukonga.miuix.kmp.theme.MiuixTheme
@@ -54,6 +67,26 @@ import top.yukonga.miuix.kmp.theme.lightColorScheme
 
 internal enum class Tab(val title: String) { Updates("更新"), Subscriptions("订阅"), Settings("设置") }
 internal enum class Editor { Add, Proxy, Token, Interval, Appearance, Repository }
+
+private data class UiPage(val tab: Tab, val historyId: Long?, val detailId: Long?) {
+    val depth get() = if (detailId != null) 2 else if (historyId != null) 1 else 0
+    val key get() = when {
+        detailId != null -> "detail:$detailId"
+        historyId != null -> "history:$historyId"
+        else -> tab.name
+    }
+}
+
+internal fun Modifier.blockInactiveInput(active: Boolean): Modifier {
+    if (active) return this
+    return clearAndSetSemantics {}.pointerInput(Unit) {
+        awaitPointerEventScope {
+            while (true) {
+                awaitPointerEvent(PointerEventPass.Initial).changes.forEach { it.consume() }
+            }
+        }
+    }
+}
 
 @Composable
 internal fun TrackerUi(
@@ -118,87 +151,122 @@ internal fun TrackerUi(
             }
         }
         BackHandler(enabled = editor == null && (detailId != null || historyId != null || tab != Tab.Updates), onBack = back)
+        val currentPage = UiPage(tab, historyId, detailId)
+        // Keep the popup host outside the animated pages so sheets can finish their exit.
         Scaffold(
             containerColor = colors.background,
-            topBar = {
-                if (detailId != null || historyId != null) {
-                    Row(
-                        Modifier.fillMaxWidth().statusBarsPadding().heightIn(min = 52.dp).padding(horizontal = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        IconButton(onClick = back, modifier = Modifier.size(48.dp)) {
-                            Icon(MiuixIcons.Back, contentDescription = "返回")
+            contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        ) {
+            AnimatedContent(
+                targetState = currentPage,
+                contentKey = { it.key },
+                modifier = Modifier.fillMaxSize().clipToBounds(),
+                transitionSpec = {
+                    val motion = folmeSpring<IntOffset>(damping = .95f, response = .5f)
+                    when {
+                        targetState.depth > initialState.depth -> ContentTransform(
+                            slideInHorizontally(motion) { it },
+                            slideOutHorizontally(motion) { -it / 4 },
+                            targetContentZIndex = targetState.depth.toFloat(),
+                        )
+                        targetState.depth < initialState.depth -> ContentTransform(
+                            slideInHorizontally(motion) { -it / 4 },
+                            slideOutHorizontally(motion) { it },
+                            targetContentZIndex = targetState.depth.toFloat(),
+                        )
+                        else -> {
+                            val direction = if (targetState.tab.ordinal >= initialState.tab.ordinal) 1 else -1
+                            val tabMotion = folmeSpring<IntOffset>(damping = .95f, response = .38f)
+                            ContentTransform(
+                                slideInHorizontally(tabMotion) { direction * it / 12 } +
+                                    fadeIn(tween(180)),
+                                slideOutHorizontally(tabMotion) { -direction * it / 12 } +
+                                    fadeOut(tween(140)),
+                                targetContentZIndex = targetState.depth.toFloat(),
+                            )
                         }
-                        Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                            Text(if (detailId != null) "版本详情" else "历史版本",
-                                fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
-                        }
-                        Spacer(Modifier.width(48.dp))
-                    }
-                } else {
-                    PageHeader(tab.title, if (tab == Tab.Updates) state.checkedAt else null) {
-                        when (tab) {
-                            Tab.Updates -> IconButton(
-                                onClick = { scope.launch { tracker.refresh() } },
-                                modifier = Modifier.size(48.dp),
-                                enabled = !state.refreshing && state.subscriptions.isNotEmpty(),
-                            ) {
-                                if (state.refreshing) CircularProgressIndicator(size = 20.dp, strokeWidth = 2.dp)
-                                else Icon(MiuixIcons.Refresh, contentDescription = "检查更新")
+                    }.using(null)
+                },
+                label = "Miuix page navigation",
+            ) { page ->
+                holder.SaveableStateProvider(page.key) {
+                    Scaffold(
+                        modifier = Modifier.fillMaxSize().blockInactiveInput(page.key == currentPage.key),
+                        containerColor = colors.background,
+                        topBar = {
+                            if (page.depth > 0) {
+                                Row(
+                                    Modifier.fillMaxWidth().statusBarsPadding().heightIn(min = 52.dp).padding(horizontal = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    IconButton(onClick = back, modifier = Modifier.size(48.dp)) {
+                                        Icon(MiuixIcons.Back, contentDescription = "返回")
+                                    }
+                                    Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                                        Text(if (page.detailId != null) "版本详情" else "历史版本",
+                                            fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
+                                    }
+                                    Spacer(Modifier.width(48.dp))
+                                }
+                            } else {
+                                PageHeader(page.tab.title, if (page.tab == Tab.Updates) state.checkedAt else null) {
+                                    when (page.tab) {
+                                        Tab.Updates -> IconButton(
+                                            onClick = { scope.launch { tracker.refresh() } },
+                                            modifier = Modifier.size(48.dp),
+                                            enabled = !state.refreshing && state.subscriptions.isNotEmpty(),
+                                        ) {
+                                            if (state.refreshing) CircularProgressIndicator(size = 20.dp, strokeWidth = 2.dp)
+                                            else Icon(MiuixIcons.Refresh, contentDescription = "检查更新")
+                                        }
+                                        Tab.Subscriptions -> IconButton(onClick = { editor = Editor.Add }, modifier = Modifier.size(48.dp)) {
+                                            Icon(MiuixIcons.Add, contentDescription = "添加订阅")
+                                        }
+                                        Tab.Settings -> Unit
+                                    }
+                                }
                             }
-                            Tab.Subscriptions -> IconButton(onClick = { editor = Editor.Add }, modifier = Modifier.size(48.dp)) {
-                                Icon(MiuixIcons.Add, contentDescription = "添加订阅")
+                        },
+                        bottomBar = {
+                            if (page.depth == 0) AppNavigation(page.tab) { tab = it }
+                        },
+                    ) { insets ->
+                        Box(Modifier.fillMaxSize().padding(insets).consumeWindowInsets(insets)) {
+                            when {
+                                page.detailId != null -> ReleasePageContent(page.detailId, tracker)
+                                page.historyId != null -> RepositoryHistoryPage(
+                                    page.historyId, tracker, state.preferences.prereleases,
+                                    state.subscriptions.firstOrNull { it.id == page.historyId },
+                                    onOpen = { detailId = it },
+                                )
+                                else -> when (page.tab) {
+                                    Tab.Updates -> FeedPage(state, onAdd = { editor = Editor.Add }, onOpen = { historyId = it })
+                                    Tab.Subscriptions -> SubscriptionsPage(
+                                        state.subscriptions,
+                                        onAdd = { editor = Editor.Add },
+                                        onOpen = { repository = it; editor = Editor.Repository },
+                                    )
+                                    Tab.Settings -> SettingsPage(
+                                        state, tracker, notificationsAllowed, requestNotifications, onEdit = { editor = it },
+                                    )
+                                }
                             }
-                            Tab.Settings -> Unit
                         }
                     }
                 }
-            },
-            bottomBar = {
-                if (detailId == null && historyId == null) AppNavigation(tab) { tab = it }
-            },
-        ) { insets ->
-            Box(Modifier.fillMaxSize().padding(insets).consumeWindowInsets(insets)) {
-                val id = detailId
-                if (id != null) {
-                    ReleasePageContent(id, tracker)
-                } else if (historyId != null) {
-                    val subscriptionId = requireNotNull(historyId)
-                    holder.SaveableStateProvider("history:$subscriptionId") {
-                        RepositoryHistoryPage(
-                            subscriptionId, tracker, state.preferences.prereleases,
-                            state.subscriptions.firstOrNull { it.id == subscriptionId },
-                            onOpen = { detailId = it },
-                        )
-                    }
-                } else {
-                    holder.SaveableStateProvider(tab.name) {
-                        when (tab) {
-                            Tab.Updates -> FeedPage(state, onAdd = { editor = Editor.Add }, onOpen = { historyId = it })
-                            Tab.Subscriptions -> SubscriptionsPage(
-                                state.subscriptions,
-                                onAdd = { editor = Editor.Add },
-                                onOpen = { repository = it; editor = Editor.Repository },
-                            )
-                            Tab.Settings -> SettingsPage(
-                                state, tracker, notificationsAllowed, requestNotifications, onEdit = { editor = it },
-                            )
-                        }
-                    }
-                }
-                editor?.let { active ->
-                    key(active) {
-                        SettingsSheet(
-                            editor = active, state = state, tracker = tracker, subscription = repository,
-                            onClose = { editor = null; repository = null },
-                            onAdded = {
-                                editor = null
-                                tab = Tab.Subscriptions
-                                if (state.preferences.notifications && state.subscriptions.isEmpty()) requestNotifications()
-                            },
-                            onHistory = { subscriptionId -> editor = null; repository = null; historyId = subscriptionId },
-                        )
-                    }
+            }
+            editor?.let { active ->
+                key(active) {
+                    SettingsSheet(
+                        editor = active, state = state, tracker = tracker, subscription = repository,
+                        onClose = { editor = null; repository = null },
+                        onAdded = {
+                            editor = null
+                            tab = Tab.Subscriptions
+                            if (state.preferences.notifications && state.subscriptions.isEmpty()) requestNotifications()
+                        },
+                        onHistory = { subscriptionId -> editor = null; repository = null; historyId = subscriptionId },
+                    )
                 }
             }
         }
