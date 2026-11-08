@@ -67,3 +67,38 @@ jobs:
           path: ${{ steps.package.outputs.path }}
           archive: false
           if-no-files-found: error
+
+      - name: Push signed APK to MessagePush
+        env:
+          MESSAGE_PUSH_URL: ${{ secrets.MESSAGE_PUSH_URL }}
+          MESSAGE_PUSH_API_TOKEN: ${{ secrets.MESSAGE_PUSH_API_TOKEN }}
+          MESSAGE_PUSH_CHANNEL_ID: RepoUpdate
+          APK_PATH: ${{ steps.package.outputs.path }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$MESSAGE_PUSH_URL" || -z "$MESSAGE_PUSH_API_TOKEN" ]]; then
+            printf 'MessagePush URL or API token is missing.\n' >&2
+            exit 1
+          fi
+          if [[ ! -s "$APK_PATH" ]]; then
+            printf 'Signed APK is missing.\n' >&2
+            exit 1
+          fi
+
+          revision=$(git log -1 --format='%h %s')
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          caption=$(printf '### 仓库更新构建完成\n\n- APK：`%s`\n- 提交：%s\n\n[查看 GitHub Actions 构建](%s)' "${APK_PATH##*/}" "$revision" "$run_url")
+          status=$(
+            printf 'X-API-Token: %s\n' "$MESSAGE_PUSH_API_TOKEN" |
+              curl --silent --show-error --connect-timeout 15 --max-time 180 \
+                --output /dev/null --write-out '%{http_code}' --header @- \
+                --form-string "channelId=$MESSAGE_PUSH_CHANNEL_ID" \
+                --form-string "caption=$caption" \
+                --form "files=@$APK_PATH;type=application/vnd.android.package-archive" \
+                "${MESSAGE_PUSH_URL%/}/api/upload"
+          )
+          if [[ "$status" != 201 ]]; then
+            printf 'MessagePush upload failed (HTTP %s).\n' "$status" >&2
+            exit 1
+          fi
+          printf 'MessagePush accepted the signed APK for %s (HTTP 201).\n' "$MESSAGE_PUSH_CHANNEL_ID"

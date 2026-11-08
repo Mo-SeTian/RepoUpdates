@@ -10,6 +10,8 @@
 
 应用要求 Android 8.0 或以上。推送到 `main` 会自动构建签名 APK，也可在 [GitHub Actions](https://github.com/Mo-SeTian/RepoUpdates/actions/workflows/android-release.yml) 手动运行工作流。从成功运行的 Artifacts 下载 APK，文件名格式为 `仓库更新_版本号_realse_MD5前8位.apk`。
 
+APK 打包完成后，工作流会通过 MessagePush 把产物和构建说明发到 `RepoUpdate` 频道。此步骤读取 Actions Secrets 中的 `MESSAGE_PUSH_URL` 和 `MESSAGE_PUSH_API_TOKEN`。
+
 本地开发需要 JDK 17 和 Android SDK 36。运行 `./gradlew :app:assembleDebug` 构建调试版。
 
 ## 致谢
