@@ -27,8 +27,10 @@ jobs:
           java-version: '17'
           cache: gradle
 
-      - name: Install Android SDK components
-        run: sdkmanager --install 'platforms;android-36' 'build-tools;35.0.0'
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
+        with:
+          packages: 'platforms;android-36 build-tools;35.0.0'
 
       - name: Run unit tests and lint
         run: ./gradlew --no-daemon :app:testDebugUnitTest :app:lintDebug
