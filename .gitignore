@@ -1,0 +1,15 @@
+.gradle/
+.kotlin/
+**/build/
+local.properties
+*.iml
+.DS_Store
+
+/dist/
+/仓库更新-Miuix-*.png
+/private/
+.env
+*.keystore
+*.jks
+*.p12
+*.pfx

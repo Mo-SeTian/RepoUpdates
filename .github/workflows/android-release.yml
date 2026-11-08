@@ -1,0 +1,67 @@
+name: Android Release APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Java 17
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Install Android SDK components
+        run: sdkmanager --install 'platforms;android-36' 'build-tools;35.0.0'
+
+      - name: Run unit tests and lint
+        run: ./gradlew --no-daemon :app:testDebugUnitTest :app:lintDebug
+
+      - name: Build and sign release
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE }}
+          REPO_UPDATES_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_PASSWORD }}
+          REPO_UPDATES_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_ALIAS }}
+        run: |
+          set -eu
+          if [[ -z "$KEYSTORE_BASE64" || -z "$REPO_UPDATES_KEYSTORE_PASSWORD" || -z "$REPO_UPDATES_KEY_ALIAS" ]]; then
+            printf 'Release signing secrets are missing.\n' >&2
+            exit 1
+          fi
+          umask 077
+          keystore=$(mktemp "$RUNNER_TEMP/repoupdates.XXXXXX.p12")
+          trap 'rm -f -- "$keystore"' EXIT
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          unset KEYSTORE_BASE64
+          export REPO_UPDATES_KEYSTORE_PATH="$keystore"
+          ./gradlew --no-daemon :app:assembleRelease
+
+      - name: Verify APK and name artifact
+        id: package
+        run: |
+          set -eu
+          apk=$(./scripts/package-release.sh app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/signed-apk")
+          printf 'path=%s\n' "$apk" >> "$GITHUB_OUTPUT"
+
+      - name: Upload signed APK
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          path: ${{ steps.package.outputs.path }}
+          archive: false
+          if-no-files-found: error
