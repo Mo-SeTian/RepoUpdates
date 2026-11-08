@@ -48,6 +48,7 @@ internal fun SettingsPage(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val config = state.preferences
+    val needsNotificationPermission = config.notifications && !notificationsAllowed
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(start = 16.dp, end = 16.dp, top = 5.dp, bottom = 24.dp),
         verticalArrangement = Arrangement.spacedBy(15.dp),
@@ -72,10 +73,15 @@ internal fun SettingsPage(
                     scope.launch { tracker.setNotifications(enabled) }
                     if (enabled) requestNotifications()
                 },
-                title = "新版本通知", insideMargin = preferencePadding, modifier = Modifier.heightIn(min = 49.dp),
+                title = "新版本通知", summary = if (needsNotificationPermission) "系统通知未授权" else null,
+                insideMargin = preferencePadding, modifier = Modifier.heightIn(min = 49.dp),
             )
             RowDivider()
-            PreferenceArrow("系统通知设置", if (notificationsAllowed) "已允许" else "未允许") {
+            PreferenceArrow("系统通知设置", when {
+                notificationsAllowed -> "已允许"
+                needsNotificationPermission -> "去授权"
+                else -> "未允许"
+            }) {
                 context.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName))
             }
         }
@@ -185,6 +191,7 @@ internal fun SettingsSheet(
                 Editor.Interval -> "检查间隔"
                 Editor.Appearance -> "深色模式"
                 Editor.Repository -> if (confirmingRemoval) "取消订阅" else subscription?.repo?.name.orEmpty()
+                Editor.CheckResult -> "检查结果"
             }
             Text(title, fontSize = 20.sp, lineHeight = 26.sp, fontWeight = FontWeight.SemiBold)
             when (editor) {
@@ -269,6 +276,18 @@ internal fun SettingsSheet(
                             scope.launch { tracker.setAppearance(key); close() }
                         }
                     }
+                }
+                Editor.CheckResult -> {
+                    state.checkResult?.let { result ->
+                        val counts = buildList {
+                            add("${result.checked} 个成功")
+                            if (result.failed > 0) add("${result.failed} 个失败")
+                            if (result.skipped > 0) add("${result.skipped} 个未检查")
+                        }
+                        Meta(counts.joinToString(" · "))
+                        result.error?.let { Text(it, fontSize = 14.sp, color = MiuixTheme.colorScheme.error) }
+                    }
+                    TextButton("关闭", close, modifier = Modifier.fillMaxWidth(), minHeight = 48.dp)
                 }
                 Editor.Repository -> if (subscription != null) {
                     Meta(subscription.repo.fullName)

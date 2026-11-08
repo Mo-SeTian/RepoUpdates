@@ -33,13 +33,20 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
@@ -66,7 +73,7 @@ import top.yukonga.miuix.kmp.theme.darkColorScheme
 import top.yukonga.miuix.kmp.theme.lightColorScheme
 
 internal enum class Tab(val title: String) { Updates("更新"), Subscriptions("订阅"), Settings("设置") }
-internal enum class Editor { Add, Proxy, Token, Interval, Appearance, Repository }
+internal enum class Editor { Add, Proxy, Token, Interval, Appearance, Repository, CheckResult }
 
 private data class UiPage(val historyId: Long?, val detailId: Long?) {
     val depth get() = if (detailId != null) 2 else if (historyId != null) 1 else 0
@@ -112,6 +119,10 @@ internal fun TrackerUi(
     var tab by rememberSaveable { mutableStateOf(Tab.Updates) }
     var detailId by rememberSaveable { mutableStateOf<Long?>(null) }
     var historyId by rememberSaveable { mutableStateOf<Long?>(null) }
+    var subscriptionQuery by rememberSaveable { mutableStateOf<String?>(null) }
+    var focusSearch by remember { mutableStateOf(false) }
+    val searchFocus = remember { FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
     var editor by remember { mutableStateOf<Editor?>(null) }
     var repository by remember { mutableStateOf<Subscription?>(null) }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { onPermissionChanged() }
@@ -156,6 +167,7 @@ internal fun TrackerUi(
             when {
                 detailId != null -> detailId = null
                 historyId != null -> historyId = null
+                tab == Tab.Subscriptions && subscriptionQuery != null -> subscriptionQuery = null
                 else -> tab = Tab.Updates
             }
         }
@@ -202,7 +214,9 @@ internal fun TrackerUi(
                         ) { pageTab ->
                             holder.SaveableStateProvider(pageTab.name) {
                                 Column(Modifier.fillMaxSize().background(colors.background).blockInactiveInput(pageTab == tab)) {
-                                    PageHeader(pageTab.title, if (pageTab == Tab.Updates) state.checkedAt else null) {
+                                    PageHeader(pageTab.title, subtitle = {
+                                        if (pageTab == Tab.Updates) CheckStatus(state) { editor = Editor.CheckResult }
+                                    }) {
                                         when (pageTab) {
                                             Tab.Updates -> IconButton(
                                                 onClick = { scope.launch { tracker.refresh() } },
@@ -212,8 +226,24 @@ internal fun TrackerUi(
                                                 if (state.refreshing) CircularProgressIndicator(size = 20.dp, strokeWidth = 2.dp)
                                                 else Icon(MiuixIcons.Refresh, contentDescription = "检查更新")
                                             }
-                                            Tab.Subscriptions -> IconButton(onClick = { editor = Editor.Add }, modifier = Modifier.size(48.dp)) {
-                                                Icon(MiuixIcons.Add, contentDescription = "添加订阅")
+                                            Tab.Subscriptions -> {
+                                                if (subscriptionQuery != null || state.subscriptions.isNotEmpty()) {
+                                                    IconButton(onClick = {
+                                                        if (subscriptionQuery == null) {
+                                                            subscriptionQuery = ""
+                                                            focusSearch = true
+                                                        } else {
+                                                            keyboard?.hide()
+                                                            subscriptionQuery = null
+                                                        }
+                                                    }, modifier = Modifier.size(48.dp)) {
+                                                        if (subscriptionQuery == null) Icon(MiuixIcons.Search, "搜索订阅")
+                                                        else Icon(MiuixIcons.Close, "关闭搜索")
+                                                    }
+                                                }
+                                                IconButton(onClick = { editor = Editor.Add }, modifier = Modifier.size(48.dp)) {
+                                                    Icon(MiuixIcons.Add, contentDescription = "添加订阅")
+                                                }
                                             }
                                             Tab.Settings -> Unit
                                         }
@@ -224,12 +254,37 @@ internal fun TrackerUi(
                                         ),
                                     ) {
                                         when (pageTab) {
-                                            Tab.Updates -> FeedPage(state, onAdd = { editor = Editor.Add }, onOpen = { historyId = it })
-                                            Tab.Subscriptions -> SubscriptionsPage(
-                                                state.subscriptions,
-                                                onAdd = { editor = Editor.Add },
-                                                onOpen = { repository = it; editor = Editor.Repository },
+                                            Tab.Updates -> FeedPage(
+                                                state, onAdd = { editor = Editor.Add },
+                                                onOpen = { historyId = it }, onReadNotes = { detailId = it },
                                             )
+                                            Tab.Subscriptions -> Column {
+                                                subscriptionQuery?.let { query ->
+                                                    TextField(
+                                                        value = query, onValueChange = { subscriptionQuery = it },
+                                                        label = "搜索仓库名或 owner/repo", useLabelAsPlaceholder = true,
+                                                        singleLine = true, cornerRadius = 12.dp,
+                                                        modifier = Modifier.padding(horizontal = 16.dp).padding(bottom = 6.dp)
+                                                            .fillMaxWidth().focusRequester(searchFocus),
+                                                    )
+                                                    LaunchedEffect(focusSearch) {
+                                                        if (focusSearch) {
+                                                            searchFocus.requestFocus()
+                                                            keyboard?.show()
+                                                            focusSearch = false
+                                                        }
+                                                    }
+                                                }
+                                                SubscriptionsPage(
+                                                    state.subscriptions, subscriptionQuery,
+                                                    onAdd = { editor = Editor.Add },
+                                                    onOpen = {
+                                                        if (subscriptionQuery != null) keyboard?.hide()
+                                                        repository = it
+                                                        editor = Editor.Repository
+                                                    },
+                                                )
+                                            }
                                             Tab.Settings -> SettingsPage(
                                                 state, tracker, notificationsAllowed, requestNotifications, onEdit = { editor = it },
                                             )
@@ -296,7 +351,7 @@ internal fun TrackerUi(
 }
 
 @Composable
-private fun PageHeader(title: String, checkedAt: Long?, action: @Composable () -> Unit) {
+private fun PageHeader(title: String, subtitle: @Composable () -> Unit, action: @Composable () -> Unit) {
     Row(
         Modifier.fillMaxWidth().statusBarsPadding().padding(start = 20.dp, end = 10.dp, top = 10.dp, bottom = 12.dp)
             .heightIn(min = 48.dp),
@@ -304,12 +359,37 @@ private fun PageHeader(title: String, checkedAt: Long?, action: @Composable () -
     ) {
         Column(Modifier.weight(1f)) {
             Text(title, fontSize = 26.sp, lineHeight = 31.sp, fontWeight = FontWeight.SemiBold)
-            if (checkedAt != null) {
-                Spacer(Modifier.height(4.dp))
-                Meta(if (checkedAt == 0L) "尚未检查" else "上次检查  ${dateLabel(checkedAt, time = true)}")
-            }
+            subtitle()
         }
         action()
+    }
+}
+
+@Composable
+private fun CheckStatus(state: TrackerState, onShowResult: () -> Unit) {
+    val result = state.checkResult
+    val failed = !state.refreshing && result?.error != null
+    val label = when {
+        state.refreshing -> "正在检查…"
+        result != null && failed && result.failed == 0 -> "检查失败 · ${result.skipped} 个未检查"
+        result != null && failed && result.skipped > 0 -> "${result.failed} 个失败 · ${result.skipped} 个未检查"
+        result != null && failed -> "${result.failed} 个仓库检查失败"
+        result != null && result.checked > 0 -> "已检查 ${result.checked} 个仓库 · ${dateLabel(state.checkedAt, time = true)}"
+        result != null -> "已检查 ${result.checked} 个仓库"
+        state.checkedAt == 0L -> "尚未检查"
+        else -> "上次检查 ${dateLabel(state.checkedAt, time = true)}"
+    }
+    Spacer(Modifier.height(4.dp))
+    Row(
+        Modifier.semantics { liveRegion = LiveRegionMode.Polite }
+            .then(if (failed) Modifier.clickable(role = Role.Button, onClickLabel = "查看检查详情", onClick = onShowResult)
+            else Modifier),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text(label, Modifier.weight(1f, fill = false), fontSize = 13.sp, lineHeight = 18.sp,
+            color = if (failed) MiuixTheme.colorScheme.error else secondary())
+        if (failed) Chevron()
     }
 }
 
@@ -340,18 +420,10 @@ private fun AppNavigation(tab: Tab, onTab: (Tab) -> Unit) {
 }
 
 @Composable
-private fun FeedPage(state: TrackerState, onAdd: () -> Unit, onOpen: (Long) -> Unit) {
+private fun FeedPage(state: TrackerState, onAdd: () -> Unit, onOpen: (Long) -> Unit, onReadNotes: (Long) -> Unit) {
     val unread = remember(state.feed) { state.feed.filter { it.unread } }
     val earlier = remember(state.feed) { state.feed.filterNot { it.unread } }
     LazyColumn(contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 5.dp, bottom = 22.dp)) {
-        state.checkMessage?.let { message ->
-            item {
-                Card(Modifier.fillMaxWidth(), cornerRadius = 16.dp, insideMargin = PaddingValues(14.dp)) {
-                    Text(message, fontSize = 14.sp, color = MiuixTheme.colorScheme.error)
-                }
-                Spacer(Modifier.height(14.dp))
-            }
-        }
         if (state.subscriptions.isEmpty()) {
             item {
                 EmptyCard(
@@ -359,7 +431,7 @@ private fun FeedPage(state: TrackerState, onAdd: () -> Unit, onOpen: (Long) -> U
                 )
             }
         }
-        if (unread.isNotEmpty()) feedGroup("未读更新", unread, onOpen, count = unread.size)
+        if (unread.isNotEmpty()) feedGroup("未读更新", unread, onOpen, onReadNotes)
         if (unread.isNotEmpty() && earlier.isNotEmpty()) item { Spacer(Modifier.height(18.dp)) }
         if (earlier.isNotEmpty()) feedGroup("最新版本", earlier, onOpen)
         val released = state.feed.mapTo(mutableSetOf()) { it.subscriptionId }
@@ -379,10 +451,30 @@ private fun FeedPage(state: TrackerState, onAdd: () -> Unit, onOpen: (Long) -> U
     }
 }
 
-private fun LazyListScope.feedGroup(title: String, releases: List<FeedItem>, onOpen: (Long) -> Unit, count: Int? = null) {
-    item(key = title) { GroupTitle(title, count?.toString(), highlight = count != null) }
+private fun LazyListScope.feedGroup(
+    title: String,
+    releases: List<FeedItem>,
+    onOpen: (Long) -> Unit,
+    onReadNotes: ((Long) -> Unit)? = null,
+) {
+    val count = if (onReadNotes != null) releases.size.toString() else null
+    item(key = title) { GroupTitle(title, count, highlight = count != null) }
     itemsIndexed(releases, key = { _, item -> item.id }) { index, item ->
-        GroupRow(index, releases.lastIndex, onClick = { onOpen(item.subscriptionId) }) {
+        GroupRow(
+            index, releases.lastIndex, onClick = { onOpen(item.subscriptionId) },
+            action = if (onReadNotes != null) {
+                {
+                    Box(
+                        Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp)
+                            .clickable(role = Role.Button, onClickLabel = "查看更新说明", onClick = { onReadNotes(item.id) })
+                            .padding(horizontal = 8.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("说明", fontSize = 13.sp, color = MiuixTheme.colorScheme.primary)
+                    }
+                }
+            } else null,
+        ) {
             ReleaseRow(item, showRepository = true)
         }
     }
@@ -391,25 +483,32 @@ private fun LazyListScope.feedGroup(title: String, releases: List<FeedItem>, onO
 @Composable
 private fun ReleaseRow(item: FeedItem, showRepository: Boolean) {
     val showSummary = item.summary.isNotBlank() && (item.unread || !showRepository)
+    val stacked = showRepository && LocalDensity.current.fontScale >= 1.3f
     Column(
         Modifier.fillMaxWidth().heightIn(min = if (showSummary) 68.dp else 60.dp)
             .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.Center,
     ) {
+        if (stacked) {
+            Text(item.repo.name, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
+                maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Spacer(Modifier.height(4.dp))
+        }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (showRepository) {
-                    Text(item.repo.name, Modifier.weight(.75f, fill = !item.unread), fontSize = 16.sp,
+                if (showRepository && !stacked) {
+                    Text(item.repo.name, Modifier.weight(1f, fill = false), fontSize = 16.sp,
                         fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                Text(item.tag, Modifier.weight(1.25f, fill = false), fontSize = if (showRepository) 13.sp else 16.sp,
+                val tagWidth = if (showRepository && !stacked) Modifier.widthIn(max = 100.dp) else Modifier.weight(1f)
+                Text(item.tag, tagWidth, fontSize = if (showRepository) 13.sp else 16.sp,
                     color = if (showRepository) secondary() else MiuixTheme.colorScheme.onSurface,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             if (item.prerelease) Text("预发布", fontSize = 12.sp, color = secondary())
-            Meta(dateLabel(item.publishedAt, time = item.unread))
+            Meta(dateLabel(item.publishedAt, time = item.unread && !showRepository))
             if (item.unread) Box(Modifier.size(7.dp).clip(CircleShape).background(MiuixTheme.colorScheme.primary))
             Chevron()
         }
@@ -498,13 +597,28 @@ private fun RepositoryHistoryPage(
 }
 
 @Composable
-private fun SubscriptionsPage(subscriptions: List<Subscription>, onAdd: () -> Unit, onOpen: (Subscription) -> Unit) {
-    LazyColumn(contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 5.dp, bottom = 22.dp)) {
+private fun SubscriptionsPage(
+    subscriptions: List<Subscription>,
+    query: String?,
+    onAdd: () -> Unit,
+    onOpen: (Subscription) -> Unit,
+) {
+    val term = query.orEmpty().trim()
+    val matches = remember(subscriptions, term) {
+        if (term.isEmpty()) subscriptions else subscriptions.filter { it.repo.fullName.contains(term, ignoreCase = true) }
+    }
+    val scroll = androidx.compose.foundation.lazy.rememberLazyListState()
+    LaunchedEffect(query) {
+        if (query != null) scroll.scrollToItem(0)
+    }
+    LazyColumn(state = scroll, contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 5.dp, bottom = 22.dp)) {
         if (subscriptions.isEmpty()) {
             item { EmptyCard("还没有订阅仓库", "粘贴 GitHub 仓库链接即可订阅。", onAdd) }
+        } else if (matches.isEmpty()) {
+            item { EmptyCard("未找到仓库", "试试仓库名或 owner/repo。") }
         }
-        itemsIndexed(subscriptions, key = { _, item -> item.id }) { index, item ->
-            GroupRow(index, subscriptions.lastIndex, onClick = { onOpen(item) }) {
+        itemsIndexed(matches, key = { _, item -> item.id }) { index, item ->
+            GroupRow(index, matches.lastIndex, onClick = { onOpen(item) }) {
                 Row(
                     Modifier.fillMaxWidth().heightIn(min = 62.dp).padding(horizontal = 15.dp, vertical = 9.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -523,15 +637,24 @@ private fun SubscriptionsPage(subscriptions: List<Subscription>, onAdd: () -> Un
 }
 
 @Composable
-private fun GroupRow(index: Int, lastIndex: Int, onClick: () -> Unit, content: @Composable () -> Unit) {
+private fun GroupRow(
+    index: Int,
+    lastIndex: Int,
+    onClick: () -> Unit,
+    action: @Composable (() -> Unit)? = null,
+    content: @Composable () -> Unit,
+) {
     val shape = RoundedCornerShape(
         topStart = if (index == 0) 18.dp else 0.dp,
         topEnd = if (index == 0) 18.dp else 0.dp,
         bottomStart = if (index == lastIndex) 18.dp else 0.dp,
         bottomEnd = if (index == lastIndex) 18.dp else 0.dp,
     )
-    Column(Modifier.fillMaxWidth().clip(shape).background(MiuixTheme.colorScheme.surfaceContainer).clickable(onClick = onClick)) {
-        content()
+    Column(Modifier.fillMaxWidth().clip(shape).background(MiuixTheme.colorScheme.surfaceContainer)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.weight(1f).clickable(onClick = onClick)) { content() }
+            action?.invoke()
+        }
         if (index != lastIndex) RowDivider()
     }
 }

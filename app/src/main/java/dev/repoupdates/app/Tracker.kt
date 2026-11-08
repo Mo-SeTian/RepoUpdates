@@ -39,8 +39,12 @@ internal data class TrackerState(
     val preferences: Preferences,
     val checkedAt: Long,
     val refreshing: Boolean,
-    val checkMessage: String?,
+    val checkResult: CheckResult?,
 )
+
+internal data class CheckResult(val total: Int, val checked: Int, val failed: Int, val error: String?) {
+    val skipped get() = total - checked - failed
+}
 
 internal data class HistoryPage(
     val releases: List<FeedItem>,
@@ -68,7 +72,6 @@ internal class Tracker(private val app: Application) {
     private val stateLock = Mutex()
     private val historyLock = Mutex()
     private var refreshing = false
-    private var checkMessage: String? = null
     private val stateFlow = MutableStateFlow(TrackerState(emptyList(), emptyList(), preferences(), 0, false, null))
     val state: StateFlow<TrackerState> = stateFlow
 
@@ -156,10 +159,10 @@ internal class Tracker(private val app: Application) {
             if (subscriptions.isEmpty()) return@withContext
             stateLock.withLock {
                 refreshing = true
-                checkMessage = null
                 publishLocked()
             }
             var successes = 0
+            var failures = 0
             var failure: String? = null
             val configuration = preferences()
             try {
@@ -177,19 +180,29 @@ internal class Tracker(private val app: Application) {
                         }
                         successes++
                     } catch (error: GitHubFailure) {
+                        failures++
                         if (failure == null || error.stopBatch) failure = error.explanation
                         if (error.stopBatch) break
                     } catch (_: IOException) {
+                        failures++
                         if (failure == null) failure = connectionError(configuration)
                     } catch (_: JSONException) {
+                        failures++
                         if (failure == null) failure = "GitHub 返回的数据无法读取，请稍后重试"
                     }
                 }
             } catch (error: GitHubFailure) {
                 failure = error.explanation
             }
-            if (successes > 0) prefs.edit().putLong("checked_at", System.currentTimeMillis()).apply()
-            stateLock.withLock { checkMessage = failure }
+            stateLock.withLock {
+                prefs.edit().apply {
+                    if (successes > 0) putLong("checked_at", System.currentTimeMillis())
+                    putInt("last_check_total", subscriptions.size)
+                    putInt("last_check_succeeded", successes)
+                    putInt("last_check_failed", failures)
+                    putString("last_check_error", failure)
+                }.apply()
+            }
         } finally {
             try {
                 withContext(NonCancellable) {
@@ -246,9 +259,14 @@ internal class Tracker(private val app: Application) {
 
     private fun publishLocked() {
         val configuration = preferences()
+        val checkTotal = prefs.getInt("last_check_total", 0)
+        val checkResult = if (checkTotal == 0) null else CheckResult(
+            checkTotal, prefs.getInt("last_check_succeeded", 0), prefs.getInt("last_check_failed", 0),
+            prefs.getString("last_check_error", null),
+        )
         stateFlow.value = TrackerState(
             store.subscriptions(), store.latest(configuration.prereleases), configuration,
-            prefs.getLong("checked_at", 0L), refreshing, checkMessage,
+            prefs.getLong("checked_at", 0L), refreshing, checkResult,
         )
     }
 
