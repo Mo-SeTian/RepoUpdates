@@ -68,13 +68,22 @@ import top.yukonga.miuix.kmp.theme.lightColorScheme
 internal enum class Tab(val title: String) { Updates("更新"), Subscriptions("订阅"), Settings("设置") }
 internal enum class Editor { Add, Proxy, Token, Interval, Appearance, Repository }
 
-private data class UiPage(val tab: Tab, val historyId: Long?, val detailId: Long?) {
+private data class UiPage(val historyId: Long?, val detailId: Long?) {
     val depth get() = if (detailId != null) 2 else if (historyId != null) 1 else 0
     val key get() = when {
         detailId != null -> "detail:$detailId"
         historyId != null -> "history:$historyId"
-        else -> tab.name
+        else -> "tabs"
     }
+}
+
+private fun shortPageTransition(direction: Int, depth: Int = 0): ContentTransform {
+    val motion = folmeSpring<IntOffset>(damping = .95f, response = .38f)
+    return ContentTransform(
+        slideInHorizontally(motion) { direction * it / 12 } + fadeIn(tween(180)),
+        slideOutHorizontally(motion) { -direction * it / 12 } + fadeOut(tween(140)),
+        targetContentZIndex = depth.toFloat(),
+    )
 }
 
 internal fun Modifier.blockInactiveInput(active: Boolean): Modifier {
@@ -151,7 +160,7 @@ internal fun TrackerUi(
             }
         }
         BackHandler(enabled = editor == null && (detailId != null || historyId != null || tab != Tab.Updates), onBack = back)
-        val currentPage = UiPage(tab, historyId, detailId)
+        val currentPage = UiPage(historyId, detailId)
         // Keep the popup host outside the animated pages so sheets can finish their exit.
         Scaffold(
             containerColor = colors.background,
@@ -174,27 +183,70 @@ internal fun TrackerUi(
                             slideOutHorizontally(motion) { it },
                             targetContentZIndex = targetState.depth.toFloat(),
                         )
-                        else -> {
-                            val direction = if (targetState.tab.ordinal >= initialState.tab.ordinal) 1 else -1
-                            val tabMotion = folmeSpring<IntOffset>(damping = .95f, response = .38f)
-                            ContentTransform(
-                                slideInHorizontally(tabMotion) { direction * it / 12 } +
-                                    fadeIn(tween(180)),
-                                slideOutHorizontally(tabMotion) { -direction * it / 12 } +
-                                    fadeOut(tween(140)),
-                                targetContentZIndex = targetState.depth.toFloat(),
-                            )
-                        }
+                        else -> shortPageTransition(1, targetState.depth)
                     }.using(null)
                 },
                 label = "Miuix page navigation",
             ) { page ->
-                holder.SaveableStateProvider(page.key) {
-                    Scaffold(
-                        modifier = Modifier.fillMaxSize().blockInactiveInput(page.key == currentPage.key),
-                        containerColor = colors.background,
-                        topBar = {
-                            if (page.depth > 0) {
+                val pageModifier = Modifier.fillMaxSize().blockInactiveInput(page.key == currentPage.key)
+                if (page.depth == 0) {
+                    Column(pageModifier.background(colors.background)) {
+                        AnimatedContent(
+                            targetState = tab,
+                            modifier = Modifier.weight(1f).fillMaxWidth().clipToBounds(),
+                            transitionSpec = {
+                                val direction = if (targetState.ordinal > initialState.ordinal) 1 else -1
+                                shortPageTransition(direction).using(null)
+                            },
+                            label = "Miuix tab content",
+                        ) { pageTab ->
+                            holder.SaveableStateProvider(pageTab.name) {
+                                Column(Modifier.fillMaxSize().background(colors.background).blockInactiveInput(pageTab == tab)) {
+                                    PageHeader(pageTab.title, if (pageTab == Tab.Updates) state.checkedAt else null) {
+                                        when (pageTab) {
+                                            Tab.Updates -> IconButton(
+                                                onClick = { scope.launch { tracker.refresh() } },
+                                                modifier = Modifier.size(48.dp),
+                                                enabled = !state.refreshing && state.subscriptions.isNotEmpty(),
+                                            ) {
+                                                if (state.refreshing) CircularProgressIndicator(size = 20.dp, strokeWidth = 2.dp)
+                                                else Icon(MiuixIcons.Refresh, contentDescription = "检查更新")
+                                            }
+                                            Tab.Subscriptions -> IconButton(onClick = { editor = Editor.Add }, modifier = Modifier.size(48.dp)) {
+                                                Icon(MiuixIcons.Add, contentDescription = "添加订阅")
+                                            }
+                                            Tab.Settings -> Unit
+                                        }
+                                    }
+                                    Box(
+                                        Modifier.fillMaxSize().windowInsetsPadding(
+                                            WindowInsets.systemBars.union(WindowInsets.displayCutout).only(WindowInsetsSides.Horizontal),
+                                        ),
+                                    ) {
+                                        when (pageTab) {
+                                            Tab.Updates -> FeedPage(state, onAdd = { editor = Editor.Add }, onOpen = { historyId = it })
+                                            Tab.Subscriptions -> SubscriptionsPage(
+                                                state.subscriptions,
+                                                onAdd = { editor = Editor.Add },
+                                                onOpen = { repository = it; editor = Editor.Repository },
+                                            )
+                                            Tab.Settings -> SettingsPage(
+                                                state, tracker, notificationsAllowed, requestNotifications, onEdit = { editor = it },
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Keep the bar with the root page, outside the tab transition.
+                        AppNavigation(tab) { tab = it }
+                    }
+                } else {
+                    holder.SaveableStateProvider(page.key) {
+                        Scaffold(
+                            modifier = pageModifier,
+                            containerColor = colors.background,
+                            topBar = {
                                 Row(
                                     Modifier.fillMaxWidth().statusBarsPadding().heightIn(min = 52.dp).padding(horizontal = 8.dp),
                                     verticalAlignment = Alignment.CenterVertically,
@@ -208,46 +260,16 @@ internal fun TrackerUi(
                                     }
                                     Spacer(Modifier.width(48.dp))
                                 }
-                            } else {
-                                PageHeader(page.tab.title, if (page.tab == Tab.Updates) state.checkedAt else null) {
-                                    when (page.tab) {
-                                        Tab.Updates -> IconButton(
-                                            onClick = { scope.launch { tracker.refresh() } },
-                                            modifier = Modifier.size(48.dp),
-                                            enabled = !state.refreshing && state.subscriptions.isNotEmpty(),
-                                        ) {
-                                            if (state.refreshing) CircularProgressIndicator(size = 20.dp, strokeWidth = 2.dp)
-                                            else Icon(MiuixIcons.Refresh, contentDescription = "检查更新")
-                                        }
-                                        Tab.Subscriptions -> IconButton(onClick = { editor = Editor.Add }, modifier = Modifier.size(48.dp)) {
-                                            Icon(MiuixIcons.Add, contentDescription = "添加订阅")
-                                        }
-                                        Tab.Settings -> Unit
-                                    }
-                                }
-                            }
-                        },
-                        bottomBar = {
-                            if (page.depth == 0) AppNavigation(page.tab) { tab = it }
-                        },
-                    ) { insets ->
-                        Box(Modifier.fillMaxSize().padding(insets).consumeWindowInsets(insets)) {
-                            when {
-                                page.detailId != null -> ReleasePageContent(page.detailId, tracker)
-                                page.historyId != null -> RepositoryHistoryPage(
-                                    page.historyId, tracker, state.preferences.prereleases,
-                                    state.subscriptions.firstOrNull { it.id == page.historyId },
-                                    onOpen = { detailId = it },
-                                )
-                                else -> when (page.tab) {
-                                    Tab.Updates -> FeedPage(state, onAdd = { editor = Editor.Add }, onOpen = { historyId = it })
-                                    Tab.Subscriptions -> SubscriptionsPage(
-                                        state.subscriptions,
-                                        onAdd = { editor = Editor.Add },
-                                        onOpen = { repository = it; editor = Editor.Repository },
-                                    )
-                                    Tab.Settings -> SettingsPage(
-                                        state, tracker, notificationsAllowed, requestNotifications, onEdit = { editor = it },
+                            },
+                        ) { insets ->
+                            Box(Modifier.fillMaxSize().padding(insets).consumeWindowInsets(insets)) {
+                                if (page.detailId != null) {
+                                    ReleasePageContent(page.detailId, tracker)
+                                } else if (page.historyId != null) {
+                                    RepositoryHistoryPage(
+                                        page.historyId, tracker, state.preferences.prereleases,
+                                        state.subscriptions.firstOrNull { it.id == page.historyId },
+                                        onOpen = { detailId = it },
                                     )
                                 }
                             }
