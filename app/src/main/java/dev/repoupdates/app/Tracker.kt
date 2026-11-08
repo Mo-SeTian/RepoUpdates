@@ -42,6 +42,12 @@ internal data class TrackerState(
     val checkMessage: String?,
 )
 
+internal data class HistoryPage(
+    val releases: List<FeedItem>,
+    val hasMore: Boolean,
+    val error: String? = null,
+)
+
 class TrackerApplication : Application() {
     internal lateinit var tracker: Tracker
         private set
@@ -60,6 +66,7 @@ internal class Tracker(private val app: Application) {
     private val vault = TokenVault(prefs)
     private val refreshLock = Mutex()
     private val stateLock = Mutex()
+    private val historyLock = Mutex()
     private var refreshing = false
     private var checkMessage: String? = null
     private val stateFlow = MutableStateFlow(TrackerState(emptyList(), emptyList(), preferences(), 0, false, null))
@@ -110,6 +117,36 @@ internal class Tracker(private val app: Application) {
         }
         detail
     }
+
+    suspend fun history(subscriptionId: Long, beforeId: Long?, includePrereleases: Boolean): HistoryPage =
+        withContext(Dispatchers.IO) {
+            historyLock.withLock {
+                val pageSize = 20
+                var rows = store.history(subscriptionId, beforeId, includePrereleases, pageSize + 1)
+                var subscription = store.subscription(subscriptionId)
+                var error: String? = null
+                try {
+                    val client by lazy { client() }
+                    while (rows.size < pageSize && subscription?.nextHistoryPage != null) {
+                        currentCoroutineContext().ensureActive()
+                        val current = requireNotNull(subscription)
+                        val number = requireNotNull(current.nextHistoryPage)
+                        val page = requireNotNull(client.releases(current.repo, pageNumber = number))
+                        store.record(current, page, includePrereleases, historyPage = number)
+                        subscription = store.subscription(subscriptionId)
+                        rows = store.history(subscriptionId, beforeId, includePrereleases, pageSize + 1)
+                    }
+                } catch (failure: GitHubFailure) {
+                    error = failure.explanation
+                } catch (_: IOException) {
+                    error = connectionError()
+                } catch (_: JSONException) {
+                    error = "GitHub 返回的数据无法读取，请稍后重试"
+                }
+                publish()
+                HistoryPage(rows.take(pageSize), rows.size > pageSize || subscription?.nextHistoryPage != null, error)
+            }
+        }
 
     suspend fun refresh(background: Boolean = false) = withContext(Dispatchers.IO) {
         if (!refreshLock.tryLock()) return@withContext
@@ -210,7 +247,7 @@ internal class Tracker(private val app: Application) {
     private fun publishLocked() {
         val configuration = preferences()
         stateFlow.value = TrackerState(
-            store.subscriptions(), store.feed(configuration.prereleases), configuration,
+            store.subscriptions(), store.latest(configuration.prereleases), configuration,
             prefs.getLong("checked_at", 0L), refreshing, checkMessage,
         )
     }

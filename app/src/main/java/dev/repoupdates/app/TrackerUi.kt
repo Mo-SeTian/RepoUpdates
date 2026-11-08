@@ -69,6 +69,7 @@ internal fun TrackerUi(
     val holder = rememberSaveableStateHolder()
     var tab by rememberSaveable { mutableStateOf(Tab.Updates) }
     var detailId by rememberSaveable { mutableStateOf<Long?>(null) }
+    var historyId by rememberSaveable { mutableStateOf<Long?>(null) }
     var editor by remember { mutableStateOf<Editor?>(null) }
     var repository by remember { mutableStateOf<Subscription?>(null) }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { onPermissionChanged() }
@@ -81,6 +82,7 @@ internal fun TrackerUi(
         incoming?.let {
             tab = Tab.Updates
             editor = null
+            historyId = null
             detailId = it
             openRelease.value = null
         }
@@ -108,22 +110,28 @@ internal fun TrackerUi(
     )
 
     MiuixTheme(colors = colors) {
-        BackHandler(enabled = editor == null && (detailId != null || tab != Tab.Updates)) {
-            if (detailId != null) detailId = null else tab = Tab.Updates
+        val back: () -> Unit = {
+            when {
+                detailId != null -> detailId = null
+                historyId != null -> historyId = null
+                else -> tab = Tab.Updates
+            }
         }
+        BackHandler(enabled = editor == null && (detailId != null || historyId != null || tab != Tab.Updates), onBack = back)
         Scaffold(
             containerColor = colors.background,
             topBar = {
-                if (detailId != null) {
+                if (detailId != null || historyId != null) {
                     Row(
                         Modifier.fillMaxWidth().statusBarsPadding().heightIn(min = 52.dp).padding(horizontal = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        IconButton(onClick = { detailId = null }, modifier = Modifier.size(48.dp)) {
+                        IconButton(onClick = back, modifier = Modifier.size(48.dp)) {
                             Icon(MiuixIcons.Back, contentDescription = "返回")
                         }
                         Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                            Text("版本详情", fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
+                            Text(if (detailId != null) "版本详情" else "历史版本",
+                                fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
                         }
                         Spacer(Modifier.width(48.dp))
                     }
@@ -147,17 +155,26 @@ internal fun TrackerUi(
                 }
             },
             bottomBar = {
-                if (detailId == null) AppNavigation(tab) { tab = it }
+                if (detailId == null && historyId == null) AppNavigation(tab) { tab = it }
             },
         ) { insets ->
             Box(Modifier.fillMaxSize().padding(insets).consumeWindowInsets(insets)) {
                 val id = detailId
                 if (id != null) {
                     ReleasePageContent(id, tracker)
+                } else if (historyId != null) {
+                    val subscriptionId = requireNotNull(historyId)
+                    holder.SaveableStateProvider("history:$subscriptionId") {
+                        RepositoryHistoryPage(
+                            subscriptionId, tracker, state.preferences.prereleases,
+                            state.subscriptions.firstOrNull { it.id == subscriptionId },
+                            onOpen = { detailId = it },
+                        )
+                    }
                 } else {
                     holder.SaveableStateProvider(tab.name) {
                         when (tab) {
-                            Tab.Updates -> FeedPage(state, onAdd = { editor = Editor.Add }, onOpen = { detailId = it })
+                            Tab.Updates -> FeedPage(state, onAdd = { editor = Editor.Add }, onOpen = { historyId = it })
                             Tab.Subscriptions -> SubscriptionsPage(
                                 state.subscriptions,
                                 onAdd = { editor = Editor.Add },
@@ -179,7 +196,7 @@ internal fun TrackerUi(
                                 tab = Tab.Subscriptions
                                 if (state.preferences.notifications && state.subscriptions.isEmpty()) requestNotifications()
                             },
-                            onOpen = { release -> editor = null; repository = null; detailId = release },
+                            onHistory = { subscriptionId -> editor = null; repository = null; historyId = subscriptionId },
                         )
                     }
                 }
@@ -245,47 +262,147 @@ private fun FeedPage(state: TrackerState, onAdd: () -> Unit, onOpen: (Long) -> U
                 Spacer(Modifier.height(14.dp))
             }
         }
-        if (state.feed.isEmpty()) {
+        if (state.subscriptions.isEmpty()) {
             item {
                 EmptyCard(
-                    if (state.subscriptions.isEmpty()) "还没有订阅仓库" else "暂时没有版本发布",
-                    if (state.subscriptions.isEmpty()) "添加一个公开 GitHub 仓库，在这里查看新版本和更新说明。"
-                    else "已订阅仓库发布版本后，这里会显示更新。",
-                    if (state.subscriptions.isEmpty()) onAdd else null,
+                    "还没有订阅仓库", "添加一个公开 GitHub 仓库，在这里查看新版本和更新说明。", onAdd,
                 )
             }
         }
         if (unread.isNotEmpty()) feedGroup("未读更新", unread, onOpen, count = unread.size)
         if (unread.isNotEmpty() && earlier.isNotEmpty()) item { Spacer(Modifier.height(18.dp)) }
-        if (earlier.isNotEmpty()) feedGroup("较早更新", earlier, onOpen)
+        if (earlier.isNotEmpty()) feedGroup("最新版本", earlier, onOpen)
+        val released = state.feed.mapTo(mutableSetOf()) { it.subscriptionId }
+        val withoutRelease = state.subscriptions.filterNot { it.id in released }
+        if (withoutRelease.isNotEmpty()) {
+            if (state.feed.isNotEmpty()) item { Spacer(Modifier.height(18.dp)) }
+            item { GroupTitle("暂无版本") }
+            itemsIndexed(withoutRelease, key = { _, item -> "empty:${item.id}" }) { index, subscription ->
+                GroupRow(index, withoutRelease.lastIndex, onClick = { onOpen(subscription.id) }) {
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp)) {
+                        Text(subscription.repo.name, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                        Meta(if (state.preferences.prereleases) "暂无已发布版本" else "暂无正式版本")
+                    }
+                }
+            }
+        }
     }
 }
 
 private fun LazyListScope.feedGroup(title: String, releases: List<FeedItem>, onOpen: (Long) -> Unit, count: Int? = null) {
     item(key = title) { GroupTitle(title, count?.toString(), highlight = count != null) }
     itemsIndexed(releases, key = { _, item -> item.id }) { index, item ->
-        GroupRow(index, releases.lastIndex, onClick = { onOpen(item.id) }) {
-            val height = if (item.unread && item.summary.isNotBlank()) 68.dp else 60.dp
-            Column(Modifier.fillMaxWidth().heightIn(min = height).padding(horizontal = 14.dp, vertical = 10.dp),
-                verticalArrangement = Arrangement.Center) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(item.repo.name, Modifier.weight(.75f, fill = !item.unread), fontSize = 16.sp,
-                            fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(item.tag, Modifier.weight(1.25f, fill = false), fontSize = 13.sp, color = secondary(),
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-                    Meta(dateLabel(item.publishedAt, time = item.unread))
-                    if (item.unread) Box(Modifier.size(7.dp).clip(CircleShape).background(MiuixTheme.colorScheme.primary))
-                    Chevron()
+        GroupRow(index, releases.lastIndex, onClick = { onOpen(item.subscriptionId) }) {
+            ReleaseRow(item, showRepository = true)
+        }
+    }
+}
+
+@Composable
+private fun ReleaseRow(item: FeedItem, showRepository: Boolean) {
+    val showSummary = item.summary.isNotBlank() && (item.unread || !showRepository)
+    Column(
+        Modifier.fillMaxWidth().heightIn(min = if (showSummary) 68.dp else 60.dp)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (showRepository) {
+                    Text(item.repo.name, Modifier.weight(.75f, fill = !item.unread), fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                if (item.unread && item.summary.isNotBlank()) {
-                    Spacer(Modifier.height(4.dp))
-                    Text(item.summary, fontSize = 13.sp, color = secondary(), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(item.tag, Modifier.weight(1.25f, fill = false), fontSize = if (showRepository) 13.sp else 16.sp,
+                    color = if (showRepository) secondary() else MiuixTheme.colorScheme.onSurface,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            if (item.prerelease) Text("预发布", fontSize = 12.sp, color = secondary())
+            Meta(dateLabel(item.publishedAt, time = item.unread))
+            if (item.unread) Box(Modifier.size(7.dp).clip(CircleShape).background(MiuixTheme.colorScheme.primary))
+            Chevron()
+        }
+        if (showSummary) {
+            Spacer(Modifier.height(4.dp))
+            Text(item.summary, fontSize = 13.sp, color = secondary(), maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+@Composable
+private fun RepositoryHistoryPage(
+    subscriptionId: Long,
+    tracker: Tracker,
+    includePrereleases: Boolean,
+    subscription: Subscription?,
+    onOpen: (Long) -> Unit,
+) {
+    var anchors by rememberSaveable(subscriptionId, includePrereleases) { mutableStateOf(listOf<Long?>(null)) }
+    var pageIndex by rememberSaveable(subscriptionId, includePrereleases) { mutableIntStateOf(0) }
+    var retry by remember { mutableIntStateOf(0) }
+    val page by produceState<HistoryPage?>(null, subscriptionId, includePrereleases, pageIndex, retry) {
+        value = null
+        value = tracker.history(subscriptionId, anchors[pageIndex], includePrereleases)
+    }
+    val scroll = androidx.compose.foundation.lazy.rememberLazyListState()
+    LaunchedEffect(pageIndex) { scroll.scrollToItem(0) }
+
+    Column(Modifier.fillMaxSize()) {
+        subscription?.let {
+            Column(Modifier.padding(start = 21.dp, end = 21.dp, top = 10.dp, bottom = 12.dp)) {
+                Text(it.repo.name, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                Meta(it.repo.fullName)
+            }
+        }
+        LazyColumn(
+            state = scroll, modifier = Modifier.weight(1f),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 16.dp),
+        ) {
+            val current = page
+            if (current == null) {
+                item { Box(Modifier.fillMaxWidth().padding(28.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(size = 24.dp)
+                } }
+            } else {
+                current.error?.let { error ->
+                    item {
+                        Card(Modifier.fillMaxWidth(), cornerRadius = 16.dp, insideMargin = PaddingValues(14.dp)) {
+                            Text(error, fontSize = 14.sp, color = MiuixTheme.colorScheme.error)
+                            TextButton("重试", onClick = { retry++ }, minHeight = 48.dp)
+                        }
+                        Spacer(Modifier.height(12.dp))
+                    }
+                }
+                if (current.releases.isEmpty() && current.error == null) {
+                    item { EmptyCard("暂无历史版本", "仓库发布版本后会显示在这里。") }
+                }
+                itemsIndexed(current.releases, key = { _, release -> release.id }) { index, release ->
+                    GroupRow(index, current.releases.lastIndex, onClick = { onOpen(release.id) }) {
+                        ReleaseRow(release, showRepository = false)
+                    }
                 }
             }
+        }
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            TextButton("上一页", onClick = { pageIndex-- }, enabled = page != null && pageIndex > 0,
+                modifier = Modifier.weight(1f), minHeight = 48.dp)
+            Text("第 ${pageIndex + 1} 页", fontSize = 13.sp, color = secondary())
+            TextButton(
+                "下一页",
+                onClick = {
+                    val last = page?.releases?.lastOrNull()
+                    if (last != null) {
+                        anchors = anchors.take(pageIndex + 1) + last.id
+                        pageIndex++
+                    }
+                },
+                enabled = page?.hasMore == true && page?.releases?.isNotEmpty() == true,
+                modifier = Modifier.weight(1f), minHeight = 48.dp,
+            )
         }
     }
 }

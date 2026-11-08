@@ -1,6 +1,6 @@
 # 仓库更新
 
-仓库更新是一款用 Kotlin、Jetpack Compose 和 Miuix 构建的 Android 应用，用于订阅公开 GitHub 仓库的 Release。首页集中显示各仓库的版本号、发布时间和未读更新，点开即可阅读 Markdown 更新说明。
+仓库更新是一款用 Kotlin、Jetpack Compose 和 Miuix 构建的 Android 应用，用于订阅公开 GitHub 仓库的 Release。首页按仓库展示最新版本、发布时间和未读状态。点开仓库可分页浏览历史版本，每页 20 条，再点具体版本阅读 Markdown 更新说明。
 
 - 粘贴仓库链接或输入 `owner/repo` 添加订阅。
 - 支持手动刷新、可调的后台检查间隔和新版本通知。默认每 6 小时检查一次正式版。

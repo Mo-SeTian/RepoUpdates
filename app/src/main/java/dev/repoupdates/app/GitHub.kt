@@ -9,6 +9,7 @@ import java.util.Locale
 import java.util.concurrent.TimeUnit
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -99,7 +100,14 @@ internal data class GitHubRelease(
 
 internal data class GitHubRepository(val id: Long, val repo: RepoName)
 
-internal data class ReleasePage(val releases: List<GitHubRelease>, val etag: String?)
+internal data class ReleasePage(val releases: List<GitHubRelease>, val etag: String?, val nextPage: Int? = null)
+
+private val nextReleaseLink = Regex("""<([^>]+)>\s*;\s*rel="next"""")
+
+internal fun nextReleasePage(links: List<String>, currentPage: Int): Int? =
+    links.asSequence().flatMap { nextReleaseLink.findAll(it) }
+        .mapNotNull { it.groupValues[1].toHttpUrlOrNull()?.queryParameter("page")?.toIntOrNull() }
+        .firstOrNull { it > currentPage }
 
 internal class GitHubFailure(
     val explanation: String,
@@ -123,14 +131,16 @@ internal class GitHubClient(proxy: ProxyAddress?, private val token: String?) {
     }
 
     // A rolling window keeps each repository to one request per check, including when there are no releases.
-    fun releases(repo: RepoName, etag: String? = null): ReleasePage? {
-        val url = repoUrl(repo).newBuilder().addPathSegment("releases").addQueryParameter("per_page", "100").build()
+    fun releases(repo: RepoName, etag: String? = null, pageNumber: Int = 1): ReleasePage? {
+        val url = repoUrl(repo).newBuilder().addPathSegment("releases").addQueryParameter("per_page", "100")
+            .apply { if (pageNumber > 1) addQueryParameter("page", pageNumber.toString()) }.build()
         return get(url, etag) { response ->
             if (response.code == 304) return@get null
             val array = JSONArray(requireNotNull(response.body).string())
             ReleasePage(
                 List(array.length()) { array.getJSONObject(it) }.mapNotNull { GitHubRelease.fromJson(it, repo) },
                 response.header("ETag"),
+                nextReleasePage(response.headers("Link"), pageNumber),
             )
         }
     }

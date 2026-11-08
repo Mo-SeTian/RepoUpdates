@@ -113,7 +113,7 @@ internal fun SettingsSheet(
     subscription: Subscription?,
     onClose: () -> Unit,
     onAdded: () -> Unit,
-    onOpen: (Long) -> Unit,
+    onHistory: (Long) -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -274,7 +274,7 @@ internal fun SettingsSheet(
                         }
                     } else {
                         val latest = state.feed.filter { it.repo.key == subscription.repo.key }.maxByOrNull { it.publishedAt }
-                        if (latest != null) PreferenceArrow("最新版本", latest.tag) { onOpen(latest.id) }
+                        PreferenceArrow("历史版本", latest?.tag ?: "暂无版本") { onHistory(subscription.id) }
                         TextButton("在 GitHub 查看", { openWeb(context, Uri.parse(subscription.repo.webUrl)) },
                             modifier = Modifier.fillMaxWidth(), minHeight = 48.dp)
                         TextButton("取消订阅", { confirmingRemoval = true }, modifier = Modifier.fillMaxWidth(),

@@ -28,6 +28,14 @@ class GitHubTest {
         assertNull(ProxyAddress.parse("http://proxy.example.com:7890/mirror"))
     }
 
+    @Test fun readsOnlyTheNextPageFromGitHubPaginationLinks() {
+        val link = """<https://api.github.com/repos/test/repo/releases?per_page=100&page=2>; rel="next", <https://api.github.com/repos/test/repo/releases?per_page=100&page=8>; rel="last" """
+        assertEquals(2, nextReleasePage(listOf(link), 1))
+        assertNull(nextReleasePage(listOf(link), 2))
+        assertNull(nextReleasePage(listOf("""<https://api.github.com/releases?page=1>; rel="prev" """), 2))
+        assertNull(nextReleasePage(emptyList(), 1))
+    }
+
     @Test fun preservesVersionNotesAndExcludesDrafts() {
         val repo = RepoName("example", "project")
         val json = JSONObject()
